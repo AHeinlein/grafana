@@ -77,86 +77,6 @@ func TestEvaluateExecutionResult(t *testing.T) {
 			},
 		},
 		{
-			desc: "zero valued two instances are two Normal state results",
-			execResults: ExecutionResults{
-				Condition: []*data.Frame{
-					data.NewFrame("", data.NewField("", data.Labels{"a": "b"}, []*float64{util.Pointer(0.0)})),
-					data.NewFrame("", data.NewField("", data.Labels{"c": "d"}, []*float64{util.Pointer(0.0)})),
-				},
-			},
-			evalResultLimit:    2,
-			expectResultLength: 2,
-			expectResults: Results{
-				{
-					State:    Normal,
-					Instance: data.Labels{"a": "b"},
-				},
-				{
-					State:    Normal,
-					Instance: data.Labels{"c": "d"},
-				},
-			},
-		},
-		{
-			desc: "zero valued two instances with an eval limit of 1 return an Error result",
-			execResults: ExecutionResults{
-				Condition: []*data.Frame{
-					data.NewFrame("", data.NewField("", data.Labels{"a": "b"}, []*float64{util.Pointer(0.0)})),
-					data.NewFrame("", data.NewField("", data.Labels{"c": "d"}, []*float64{util.Pointer(0.0)})),
-				},
-			},
-			evalResultLimit:    1,
-			expectResultLength: 1,
-			expectResults: Results{
-				{
-					State: Error,
-					Error: fmt.Errorf("query evaluation returned too many results: 2 (limit: 1)"),
-				},
-			},
-		},
-		{
-			desc: "zero valued two instances with an eval limit of 0 return two results",
-			execResults: ExecutionResults{
-				Condition: []*data.Frame{
-					data.NewFrame("", data.NewField("", data.Labels{"a": "b"}, []*float64{util.Pointer(0.0)})),
-					data.NewFrame("", data.NewField("", data.Labels{"c": "d"}, []*float64{util.Pointer(0.0)})),
-				},
-			},
-			evalResultLimit:    0,
-			expectResultLength: 2,
-			expectResults: Results{
-				{
-					State:    Normal,
-					Instance: data.Labels{"a": "b"},
-				},
-				{
-					State:    Normal,
-					Instance: data.Labels{"c": "d"},
-				},
-			},
-		},
-		{
-			desc: "zero valued two instances with an eval limit of -1 return two results",
-			execResults: ExecutionResults{
-				Condition: []*data.Frame{
-					data.NewFrame("", data.NewField("", data.Labels{"a": "b"}, []*float64{util.Pointer(0.0)})),
-					data.NewFrame("", data.NewField("", data.Labels{"c": "d"}, []*float64{util.Pointer(0.0)})),
-				},
-			},
-			evalResultLimit:    -1,
-			expectResultLength: 2,
-			expectResults: Results{
-				{
-					State:    Normal,
-					Instance: data.Labels{"a": "b"},
-				},
-				{
-					State:    Normal,
-					Instance: data.Labels{"c": "d"},
-				},
-			},
-		},
-		{
 			desc: "an execution error produces a single Error state result",
 			execResults: ExecutionResults{
 				Error: fmt.Errorf("an execution error"),
@@ -377,7 +297,7 @@ func TestEvaluateExecutionResult(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.desc, func(t *testing.T) {
-			res := evaluateExecutionResult(tc.execResults, time.Time{}, tc.evalResultLimit)
+			res := evaluateExecutionResult(tc.execResults, time.Time{})
 
 			require.Equal(t, tc.expectResultLength, len(res))
 
@@ -399,7 +319,7 @@ func TestEvaluateExecutionResultsNoData(t *testing.T) {
 				"A": "1",
 			},
 		}
-		v := evaluateExecutionResult(results, time.Time{}, -1)
+		v := evaluateExecutionResult(results, time.Time{})
 		require.Len(t, v, 1)
 		require.Equal(t, data.Labels{"datasource_uid": "1", "ref_id": "A"}, v[0].Instance)
 		require.Equal(t, NoData, v[0].State)
@@ -413,7 +333,7 @@ func TestEvaluateExecutionResultsNoData(t *testing.T) {
 				"C": "2",
 			},
 		}
-		v := evaluateExecutionResult(results, time.Time{}, -1)
+		v := evaluateExecutionResult(results, time.Time{})
 		require.Len(t, v, 2)
 
 		datasourceUIDs := make([]string, 0, len(v))
@@ -1108,6 +1028,103 @@ func TestEvaluateRaw(t *testing.T) {
 		_, err := e.EvaluateRaw(context.Background(), time.Now())
 		require.ErrorIs(t, err, context.DeadlineExceeded)
 	})
+}
+
+func TestEvaluateRawLimit(t *testing.T) {
+	resp := backend.QueryDataResponse{
+		Responses: backend.Responses{
+			"A": {
+				Frames: []*data.Frame{{
+					RefID: "A",
+					Fields: []*data.Field{
+						data.NewField(
+							"Value",
+							data.Labels{"foo": "bar"},
+							[]*float64{util.Pointer(10.0)},
+						),
+					},
+				}},
+			},
+			"B": {
+				Frames: []*data.Frame{
+					{
+						RefID: "B",
+						Fields: []*data.Field{
+							data.NewField(
+								"Value",
+								data.Labels{"foo": "bar"},
+								[]*float64{util.Pointer(10.0)},
+							),
+						},
+					},
+					{
+						RefID: "B",
+						Fields: []*data.Field{
+							data.NewField(
+								"Value",
+								data.Labels{"foo": "baz"},
+								[]*float64{util.Pointer(10.0)},
+							),
+						},
+					},
+				},
+			},
+		},
+	}
+
+	cases := []struct {
+		desc            string
+		cond            models.Condition
+		evalResultLimit int
+		error           string
+	}{
+		{
+			desc:            "too many results from the condition query results in an error",
+			cond:            models.Condition{Condition: "B"},
+			evalResultLimit: 1,
+			error:           "query evaluation returned too many results: 2 (limit: 1)",
+		},
+		{
+			desc:            "if the limit equals to the number of condition query frames, no error is returned",
+			cond:            models.Condition{Condition: "B"},
+			evalResultLimit: len(resp.Responses["B"].Frames),
+		},
+		{
+			desc:            "if the limit is 0, no error is returned",
+			cond:            models.Condition{Condition: "B"},
+			evalResultLimit: 0,
+		},
+		{
+			desc:            "if the limit is -1, no error is returned",
+			cond:            models.Condition{Condition: "B"},
+			evalResultLimit: -1,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.desc, func(t *testing.T) {
+			e := conditionEvaluator{
+				pipeline: nil,
+				expressionService: &fakeExpressionService{
+					hook: func(ctx context.Context, now time.Time, pipeline expr.DataPipeline) (*backend.QueryDataResponse, error) {
+						return &resp, nil
+					},
+				},
+				condition:       tc.cond,
+				evalResultLimit: tc.evalResultLimit,
+			}
+
+			result, err := e.EvaluateRaw(context.Background(), time.Now())
+
+			if tc.error != "" {
+				require.Error(t, err)
+				require.EqualError(t, err, tc.error)
+			} else {
+				require.NoError(t, err)
+				require.NotNil(t, result)
+			}
+		})
+	}
 }
 
 func TestResults_HasNonRetryableErrors(t *testing.T) {
